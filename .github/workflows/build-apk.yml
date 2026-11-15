@@ -3,54 +3,121 @@ name: Build KeuanganKu APK
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
-      - "*.zip"
-      - ".github/workflows/build-apk.yml"
+      - '*.zip'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - name: Setup Java 17
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK
-        run: |
-          yes | sdkmanager --licenses
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: android-actions/setup-android@v4
         with:
-          gradle-version: "8.9"
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
 
-      - name: Extract source code
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.9'
+          cache-provider: basic
+
+      - name: Find source ZIP
+        id: find_zip
+        shell: bash
         run: |
-          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+          set -euo pipefail
+          ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' | head -n 1)"
           if [ -z "$ZIP_FILE" ]; then
-            echo "File ZIP source code tidak ditemukan!"
+            echo 'Source ZIP tidak ditemukan.' >&2
             exit 1
           fi
-          mkdir source
-          unzip -q "$ZIP_FILE" -d source
+          echo "zip=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+          echo "Source: $ZIP_FILE"
 
-      - name: Build APK
+      - name: Extract source
+        shell: bash
         run: |
-          cd source/KeuanganKu
-          gradle assembleDebug
+          set -euo pipefail
+          rm -rf source
+          mkdir -p source
+          unzip -q "${{ steps.find_zip.outputs.zip }}" -d source
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - name: Locate Android project
+        id: locate_project
+        shell: bash
+        run: |
+          set -euo pipefail
+          SETTINGS_FILE="$(find source -type f -name 'settings.gradle.kts' -print -quit)"
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo 'settings.gradle.kts tidak ditemukan dalam ZIP.' >&2
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Project: $PROJECT_DIR"
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_DIR="${{ steps.locate_project.outputs.project_dir }}"
+
+          test -f "$PROJECT_DIR/settings.gradle.kts"
+          test -f "$PROJECT_DIR/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
+          echo "Struktur project OK."
+
+      - name: Build debug APK
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --version
+          gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Find APK
+        id: find_apk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_FILE="$(find '${{ steps.locate_project.outputs.project_dir }}/app/build/outputs/apk/debug' \
+            -type f -name '*.apk' -print -quit)"
+
+          if [ -z "$APK_FILE" ]; then
+            echo 'APK tidak ditemukan setelah build.' >&2
+            exit 1
+          fi
+
+          echo "apk=$APK_FILE" >> "$GITHUB_OUTPUT"
+          ls -lh "$APK_FILE"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: KeuanganKu-2.0-APK
-          path: source/KeuanganKu/app/build/outputs/apk/debug/app-debug.apk
+          name: KeuanganKu-2.0-debug
+          path: ${{ steps.find_apk.outputs.apk }}
+          if-no-files-found: error
+          retention-days: 14
